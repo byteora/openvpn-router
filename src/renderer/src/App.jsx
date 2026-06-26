@@ -287,8 +287,16 @@ export default function App() {
           </button>
         ))}
         <div className="nav-spacer" />
-        <button className="btn btn-sm" style={{ margin: '0 8px 10px' }} onClick={() => api.reconcile()}>
+        <button className="btn btn-sm" style={{ margin: '0 8px 6px' }} onClick={() => api.reconcile()}>
           ↻ Reconcile now
+        </button>
+        <button
+          className="btn btn-sm"
+          style={{ margin: '0 8px 10px' }}
+          title="Reset system DNS back to normal if it got stuck on the local resolver"
+          onClick={() => api.restoreDns()}
+        >
+          ⛑ Restore system DNS
         </button>
         <div className="sidebar-foot">
           {connectedCount} VPN{connectedCount === 1 ? '' : 's'} connected

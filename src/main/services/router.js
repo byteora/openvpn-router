@@ -114,9 +114,16 @@ class RoutingOrchestrator {
         logger.info('router', `static routes updated (+${added}/-${removed}), ${desired.length} active`)
       }
 
-      // bring up DNS-driven domain routing
-      dnsRouter.start()
-      await systemDns.apply()
+      // bring up DNS-driven domain routing — only hijack system DNS once the
+      // local resolver is actually listening, so we never point the system at a
+      // dead resolver (which would break all name resolution).
+      const dnsUp = await dnsRouter.start()
+      if (dnsUp) {
+        await systemDns.apply()
+      } else {
+        await systemDns.restore()
+        logger.warn('router', 'local DNS resolver not available; domain rules disabled (IP/CIDR rules still active)')
+      }
     } finally {
       this.pending = false
     }

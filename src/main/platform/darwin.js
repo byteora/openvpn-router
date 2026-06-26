@@ -1,6 +1,6 @@
 import fs from 'fs'
 import { app } from 'electron'
-import { run } from './common.js'
+import { run, runSync } from './common.js'
 
 /**
  * macOS backend.
@@ -163,9 +163,13 @@ export const darwinPlatform = {
     if (!service) return { ok: false, detail: 'primary network service unknown' }
 
     const prev = await run('/usr/sbin/networksetup', ['-getdnsservers', service])
-    // networksetup prints "There aren't any DNS Servers set on <svc>." when empty
+    // networksetup prints "There aren't any DNS Servers set on <svc>." when empty.
+    // Never record our own loopback resolver as "previous".
     const previous = /(\d+\.\d+\.\d+\.\d+)/.test(prev.stdout)
-      ? prev.stdout.split(/\r?\n/).map((s) => s.trim()).filter((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s))
+      ? prev.stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s) && !s.startsWith('127.'))
       : []
 
     const set = await run('/usr/sbin/networksetup', ['-setdnsservers', service, ...servers])
@@ -175,15 +179,47 @@ export const darwinPlatform = {
     return { ok: true, state: { service, previous }, detail: `${service} (was: ${previous.join(',') || 'dhcp'})` }
   },
 
-  async restoreDns(state) {
-    if (!state) return false
-    const { service, previous } = state
-    if (previous && previous.length) {
-      await run('/usr/sbin/networksetup', ['-setdnsservers', service, ...previous])
-    } else {
-      await run('/usr/sbin/networksetup', ['-setdnsservers', service, 'empty'])
+  /** Reset every network service whose DNS still contains a loopback address. */
+  async _clearLoopbackDns(sync = false) {
+    const exec = sync ? runSync : run
+    const list = await serviceDeviceMap()
+    for (const { service } of list) {
+      const res = await exec('/usr/sbin/networksetup', ['-getdnsservers', service])
+      const out = (res.stdout || '').toString()
+      if (/127\./.test(out)) {
+        await exec('/usr/sbin/networksetup', ['-setdnsservers', service, 'empty'])
+      }
     }
+  },
+
+  async restoreDns(state) {
+    if (state) {
+      const { service, previous } = state
+      if (previous && previous.length) {
+        await run('/usr/sbin/networksetup', ['-setdnsservers', service, ...previous])
+      } else {
+        await run('/usr/sbin/networksetup', ['-setdnsservers', service, 'empty'])
+      }
+    }
+    await this._clearLoopbackDns(false)
     await this.flushDns()
+    return true
+  },
+
+  /** Synchronous DNS restore for crash/signal cleanup. */
+  restoreDnsSync(state) {
+    if (state) {
+      const { service, previous } = state
+      if (previous && previous.length) {
+        runSync('/usr/sbin/networksetup', ['-setdnsservers', service, ...previous])
+      } else {
+        runSync('/usr/sbin/networksetup', ['-setdnsservers', service, 'empty'])
+      }
+    }
+    // Best-effort sync leftover scan (serviceDeviceMap is async; skip in sync
+    // path and rely on next-launch recover() for any stragglers).
+    runSync('/usr/bin/dscacheutil', ['-flushcache'])
+    runSync('/usr/bin/killall', ['-HUP', 'mDNSResponder'])
     return true
   },
 

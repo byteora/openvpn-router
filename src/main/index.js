@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url'
 import { registerIpc } from './ipc.js'
 import { orchestrator } from './services/router.js'
 import { vpnManager } from './services/vpnManager.js'
+import { systemDns } from './services/systemDns.js'
 import { getStore } from './services/store.js'
 import { logger } from './services/logger.js'
 import { platform, isSupportedPlatform } from './platform/index.js'
@@ -68,8 +69,27 @@ function createWindow() {
   })
 }
 
+// Single instance: a second copy would fight over UDP port 53 and crash. Focus
+// the existing window instead.
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+}
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
+
 app.whenReady().then(async () => {
+  if (!gotLock) return
   if (!(await ensureElevated())) return
+
+  // Self-heal: if a previous run crashed while DNS was hijacked, restore it now
+  // so the user is never stuck without name resolution.
+  await systemDns.recover()
 
   getStore()
   orchestrator.init()
@@ -103,19 +123,78 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  app.quit()
 })
 
+/**
+ * Best-effort SYNCHRONOUS cleanup for crash / signal paths, where the event
+ * loop is dying and async work would never finish. The critical action is
+ * restoring system DNS (otherwise the machine is left without name resolution).
+ */
+let emergencyDone = false
+function emergencyCleanupSync() {
+  if (emergencyDone) return
+  emergencyDone = true
+  try {
+    systemDns.restoreSync()
+  } catch {
+    /* ignore */
+  }
+  try {
+    vpnManager.disconnectAllSync()
+  } catch {
+    /* ignore */
+  }
+}
+
+// Graceful async shutdown on a normal quit (window close / Cmd+Q / app.quit()).
 let cleaningUp = false
 app.on('before-quit', async (event) => {
   if (cleaningUp) return
-  event.preventDefault()
   cleaningUp = true
-  logger.info('app', 'shutting down: disconnecting VPNs and clearing routes')
+  event.preventDefault()
+  logger.info('app', 'shutting down: disconnecting VPNs, restoring DNS, clearing routes')
+  const done = () => {
+    emergencyCleanupSync() // safety net in case async restore raced
+    app.exit(0)
+  }
+  // Hard cap so a hung command can never block quitting.
+  const guard = setTimeout(done, 4000)
   try {
     await orchestrator.shutdown()
   } catch {
     /* ignore */
   }
-  setTimeout(() => app.exit(0), 1500)
+  clearTimeout(guard)
+  done()
+})
+
+// Last-resort sync cleanup whatever the exit path.
+app.on('will-quit', () => emergencyCleanupSync())
+
+// OS signals (e.g. Ctrl+C in `sudo npm run dev`, or system shutdown).
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    emergencyCleanupSync()
+    process.exit(0)
+  })
+}
+
+// Crashes: restore DNS before dying so we don't strand the network.
+process.on('uncaughtException', (err) => {
+  try {
+    logger.error('app', `uncaught exception: ${err && err.stack ? err.stack : err}`)
+  } catch {
+    /* ignore */
+  }
+  emergencyCleanupSync()
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason) => {
+  try {
+    logger.error('app', `unhandled rejection: ${reason}`)
+  } catch {
+    /* ignore */
+  }
 })

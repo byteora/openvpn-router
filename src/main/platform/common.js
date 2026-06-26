@@ -1,4 +1,4 @@
-import { execFile } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
 
 /** Run a command, never rejecting; returns { ok, stdout, stderr, error }. */
 export function run(cmd, args, opts = {}) {
@@ -12,6 +12,19 @@ export function run(cmd, args, opts = {}) {
       })
     })
   })
+}
+
+/**
+ * Synchronous command runner for crash / signal cleanup paths, where the event
+ * loop is shutting down and async work would never complete. Never throws.
+ */
+export function runSync(cmd, args, opts = {}) {
+  try {
+    const stdout = execFileSync(cmd, args, { windowsHide: true, timeout: 8000, stdio: ['ignore', 'pipe', 'pipe'], ...opts })
+    return { ok: true, stdout: stdout ? stdout.toString() : '' }
+  } catch (err) {
+    return { ok: false, stdout: '', error: err }
+  }
 }
 
 /** Convert an IPv4 prefix length (0-32) into a dotted netmask. */

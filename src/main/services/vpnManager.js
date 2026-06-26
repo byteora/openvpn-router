@@ -230,6 +230,17 @@ export class VpnManager extends EventEmitter {
   disconnectAll() {
     for (const id of Array.from(this.connections.keys())) this.disconnect(id)
   }
+
+  /** Best-effort synchronous kill of all OpenVPN processes (crash/signal path). */
+  disconnectAllSync() {
+    for (const [, conn] of this.connections) {
+      try {
+        if (conn.proc && !conn.proc.killed) conn.proc.kill()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 export const vpnManager = new VpnManager()

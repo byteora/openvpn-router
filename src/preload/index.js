@@ -24,6 +24,7 @@ const api = {
   removeVpnRule: (vpnId, ruleId) => ipcRenderer.invoke('rule:removeVpn', { vpnId, ruleId }),
 
   reconcile: () => ipcRenderer.invoke('router:reconcile'),
+  restoreDns: () => ipcRenderer.invoke('router:restoreDns'),
 
   onVpnStatus: (cb) => {
     const handler = (_e, payload) => cb(payload)

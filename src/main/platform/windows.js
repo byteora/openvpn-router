@@ -1,9 +1,13 @@
 import fs from 'fs'
 import path from 'path'
-import { run, prefixToMask } from './common.js'
+import { run, runSync, prefixToMask } from './common.js'
 
 function ps(script) {
   return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script])
+}
+
+function psSync(script) {
+  return runSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script])
 }
 
 const OPENVPN_DIRS = [
@@ -134,7 +138,11 @@ export const windowsPlatform = {
     const prevRes = await ps(
       `(Get-DnsClientServerAddress -InterfaceIndex ${ifIndex} -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ','`
     )
-    const previous = prevRes.stdout.trim() ? prevRes.stdout.trim().split(',').map((s) => s.trim()).filter(Boolean) : []
+    // NEVER record our own loopback resolver as "previous" — otherwise a later
+    // restore would set DNS right back to 127.0.0.1 and strand the machine.
+    const previous = prevRes.stdout.trim()
+      ? prevRes.stdout.trim().split(',').map((s) => s.trim()).filter(Boolean).filter((s) => !s.startsWith('127.'))
+      : []
 
     const set = await ps(
       `Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ServerAddresses ${servers.map((s) => `'${s}'`).join(',')}`
@@ -146,15 +154,47 @@ export const windowsPlatform = {
   },
 
   async restoreDns(state) {
-    if (!state) return false
-    const { ifIndex, previous } = state
-    if (previous && previous.length) {
-      await ps(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ServerAddresses ${previous.map((s) => `'${s}'`).join(',')}`)
-    } else {
-      await ps(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ResetServerAddresses`)
+    if (state) {
+      const { ifIndex, previous } = state
+      if (previous && previous.length) {
+        await ps(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ServerAddresses ${previous.map((s) => `'${s}'`).join(',')}`)
+      } else {
+        await ps(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ResetServerAddresses`)
+      }
     }
+    // Bulletproof catch-all: reset ANY interface still pointing at our loopback
+    // resolver (covers lost/poisoned markers and wrong-interface cases).
+    await ps(this._clearLoopbackScript())
     await this.flushDns()
     return true
+  },
+
+  /** Synchronous DNS restore for crash/signal cleanup. */
+  restoreDnsSync(state) {
+    if (state) {
+      const { ifIndex, previous } = state
+      if (previous && previous.length) {
+        psSync(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ServerAddresses ${previous.map((s) => `'${s}'`).join(',')}`)
+      } else {
+        psSync(`Set-DnsClientServerAddress -InterfaceIndex ${ifIndex} -ResetServerAddresses`)
+      }
+    }
+    psSync(this._clearLoopbackScript())
+    runSync('ipconfig', ['/flushdns'])
+    return true
+  },
+
+  /**
+   * Reset every interface whose IPv4 DNS still contains a loopback (127.x)
+   * address back to automatic (DHCP). Nobody legitimately points system DNS at
+   * 127.0.0.1 except our resolver, so this is a safe leftover cleanup.
+   */
+  _clearLoopbackScript() {
+    return [
+      "Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |",
+      "Where-Object { $_.ServerAddresses | Where-Object { $_ -like '127.*' } } |",
+      'ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.InterfaceIndex -ResetServerAddresses -ErrorAction SilentlyContinue }'
+    ].join(' ')
   },
 
   async flushDns() {

@@ -5,6 +5,7 @@ import { getStore } from './services/store.js'
 import { vpnManager } from './services/vpnManager.js'
 import { orchestrator } from './services/router.js'
 import { dnsRouter } from './services/dnsRouter.js'
+import { systemDns } from './services/systemDns.js'
 import { logger } from './services/logger.js'
 import { platform } from './platform/index.js'
 
@@ -145,6 +146,13 @@ export function registerIpc(getWindow) {
   // ---- routing --------------------------------------------------------------
   ipcMain.handle('router:reconcile', async () => {
     await orchestrator.reconcile()
+    return true
+  })
+
+  // Manual escape hatch: force-restore system DNS (resets any interface still
+  // pointing at our loopback resolver).
+  ipcMain.handle('router:restoreDns', async () => {
+    await systemDns.recover()
     return true
   })
 

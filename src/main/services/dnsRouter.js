@@ -63,27 +63,53 @@ class DnsRouter {
     return { running: this.running, ...this.stats }
   }
 
+  /**
+   * Start the resolver. Resolves true once it is actually listening, false if
+   * binding fails (e.g. port 53 busy). The caller must NOT hijack system DNS
+   * unless this resolves true — otherwise the system would point at a dead
+   * resolver and lose all name resolution.
+   */
   start() {
-    if (this.running) return
-    const server = dgram.createSocket('udp4')
-    this.server = server
+    if (this.running) return Promise.resolve(true)
+    if (this._starting) return this._starting
 
-    server.on('error', (err) => {
-      logger.error('dns', `server error: ${err.message}`)
-      if (err.code === 'EADDRINUSE') {
-        logger.error('dns', `port ${LISTEN_PORT} is in use — stop any other local DNS/resolver and reconnect`)
+    this._starting = new Promise((resolve) => {
+      const server = dgram.createSocket('udp4')
+      this.server = server
+      let settled = false
+      const settle = (ok) => {
+        if (settled) return
+        settled = true
+        this._starting = null
+        resolve(ok)
       }
-      this.running = false
-    })
 
-    server.on('message', (msg, rinfo) => {
-      this._handleQuery(msg, rinfo).catch((e) => logger.warn('dns', `query error: ${e.message}`))
-    })
+      server.on('error', (err) => {
+        logger.error('dns', `server error: ${err.message}`)
+        if (err.code === 'EADDRINUSE') {
+          logger.error('dns', `port ${LISTEN_PORT} is in use — stop any other local DNS/resolver (e.g. Acrylic/dnscrypt) and reconnect`)
+        }
+        this.running = false
+        try {
+          server.close()
+        } catch {
+          /* ignore */
+        }
+        this.server = null
+        settle(false)
+      })
 
-    server.bind(LISTEN_PORT, LISTEN_ADDR, () => {
-      this.running = true
-      logger.info('dns', `local DNS resolver listening on ${LISTEN_ADDR}:${LISTEN_PORT}`)
+      server.on('message', (msg, rinfo) => {
+        this._handleQuery(msg, rinfo).catch((e) => logger.warn('dns', `query error: ${e.message}`))
+      })
+
+      server.bind(LISTEN_PORT, LISTEN_ADDR, () => {
+        this.running = true
+        logger.info('dns', `local DNS resolver listening on ${LISTEN_ADDR}:${LISTEN_PORT}`)
+        settle(true)
+      })
     })
+    return this._starting
   }
 
   stop() {
@@ -96,6 +122,7 @@ class DnsRouter {
       this.server = null
     }
     this.running = false
+    this._starting = null
   }
 
   _upstream() {
