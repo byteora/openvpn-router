@@ -1,0 +1,38 @@
+{
+  "name": "openvpn-router",
+  "version": "0.1.0",
+  "description": "OpenVPN client with policy-based (domain/IP) split routing across multiple VPNs",
+  "main": "out/main/index.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "electron-vite build && electron-builder"
+  },
+  "build": {
+    "appId": "com.openvpnrouter.app",
+    "productName": "OpenVPN Router",
+    "files": ["out/**/*"],
+    "win": {
+      "target": "nsis",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "perMachine": true
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities"
+    }
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^31.7.7",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
+  }
+}
