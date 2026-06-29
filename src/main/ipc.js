@@ -6,6 +6,7 @@ import { vpnManager } from './services/vpnManager.js'
 import { orchestrator } from './services/router.js'
 import { dnsRouter } from './services/dnsRouter.js'
 import { systemDns } from './services/systemDns.js'
+import { singboxManager } from './services/singboxManager.js'
 import { logger } from './services/logger.js'
 import { platform } from './platform/index.js'
 
@@ -25,6 +26,7 @@ export function registerIpc(getWindow) {
     ...store.getState(),
     statuses: vpnManager.getAllStatuses(),
     dns: dnsRouter.getStatus(),
+    singbox: singboxManager.getStatus(),
     platform: { name: platform.name, displayName: platform.displayName }
   })
 

@@ -3,3 +3,6 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Bundled native binaries are generated at package time (scripts/bundle-openvpn-*)
+resources/bin/

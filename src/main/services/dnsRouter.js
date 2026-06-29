@@ -33,6 +33,39 @@ class DnsRouter {
     this.stats = { queries: 0, routed: 0, lastDomain: '' }
     this._resetPending = new Set()
     this._resetTimer = null
+    this._lastExit = new Map() // domain -> last logged exit (dedupe decision logs)
+    this._ipOwner = new Map() // ip -> { exit, domain } (detect shared-CDN conflicts)
+    this._conflictWarnedAt = new Map() // "ip|exitA|exitB" -> ts (rate-limit warnings)
+  }
+
+  /**
+   * Warn when two domains with DIFFERENT exits resolve to the SAME IP. At the IP
+   * layer a /32 can only point to one tunnel, so such rules can't both hold —
+   * the route thrashes and one domain silently egresses the wrong VPN. This is
+   * common with CDNs (Cloudflare/Akamai) that share IPs across many hostnames.
+   */
+  _checkConflict(ip, exit, domain) {
+    const prev = this._ipOwner.get(ip)
+    if (prev && prev.exit !== exit && prev.domain !== domain) {
+      const key = `${ip}|${[prev.exit, exit].sort().join('|')}`
+      const now = Date.now()
+      const last = this._conflictWarnedAt.get(key) || 0
+      if (now - last > 60000) {
+        this._conflictWarnedAt.set(key, now)
+        logger.warn(
+          'dns',
+          `route conflict on ${ip}: "${prev.domain}" wants ${this._exitLabel(prev.exit)} but ` +
+            `"${domain}" wants ${this._exitLabel(exit)} — same IP can't split across VPNs ` +
+            `(shared CDN IP); route will flap. Put these domains on the same VPN.`
+        )
+      }
+    }
+    this._ipOwner.set(ip, { exit, domain })
+  }
+
+  /** Human-readable label for a routing exit ("DIRECT" or "VPN <name>"). */
+  _exitLabel(exit) {
+    return exit === 'direct' ? 'DIRECT' : `VPN ${this._vpnName(exit)}`
   }
 
   /**
@@ -204,6 +237,12 @@ class DnsRouter {
       if (!st || st.state !== 'connected' || !st.gateway) return { installed: 0, touched }
       gateway = st.gateway
       ifIndex = st.ifIndex
+      // macOS binds tunnel routes by interface to avoid the shared-gateway
+      // (10.8.0.1) collision between VPNs; make sure we actually have one even if
+      // the connect-time interface resolution hasn't landed yet.
+      if (!ifIndex && st.localIp) {
+        ifIndex = await routeManager.interfaceIndexForIp(st.localIp)
+      }
     }
 
     for (const ip of ips) {
@@ -235,6 +274,17 @@ class DnsRouter {
     const exit = this._effectiveExit(q.name)
     const proxied = exit !== 'direct'
 
+    // Log the routing decision for every domain (incl. direct), deduped so it
+    // only prints when a domain's exit actually changes — short TTLs make
+    // clients re-query constantly, which would otherwise flood the log.
+    if (q.qtype === QTYPE.A || q.qtype === QTYPE.AAAA || q.qtype === HTTPS_QTYPE) {
+      if (this._lastExit.get(q.name) !== exit) {
+        if (this._lastExit.size > 2000) this._lastExit.clear()
+        this._lastExit.set(q.name, exit)
+        logger.info('dns', `decision: ${q.name} -> ${this._exitLabel(exit)}`)
+      }
+    }
+
     // Suppress AAAA / HTTPS for proxied domains so the client uses our IPv4
     // routing path instead of leaking over IPv6 or SVCB ip hints.
     if (proxied && (q.qtype === QTYPE.AAAA || q.qtype === HTTPS_QTYPE)) {
@@ -253,11 +303,12 @@ class DnsRouter {
     if (q.qtype === QTYPE.A) {
       const ips = extractARecords(response)
       if (ips.length) {
+        if (proxied) for (const ip of ips) this._checkConflict(ip, exit, q.name)
         const { installed, touched } = await this._installRoutes(ips, exit)
         if (installed > 0) {
           this.stats.routed++
           this.stats.lastDomain = q.name
-          logger.info('dns', `${q.name} -> ${exit === 'direct' ? 'DIRECT' : 'VPN ' + this._vpnName(exit)} (${ips.join(', ')})`)
+          logger.info('dns', `routed: ${q.name} -> ${this._exitLabel(exit)} (${ips.join(', ')})`)
         }
         // Force apps to drop stale keep-alive connections onto the new path.
         this._queueReset(touched)

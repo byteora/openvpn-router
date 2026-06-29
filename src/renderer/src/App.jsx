@@ -140,11 +140,18 @@ function SettingsPage({ state, refresh }) {
   const isMac = state.platform && state.platform.name === 'darwin'
   const [form, setForm] = useState({
     openvpnPath: state.settings.openvpnPath,
-    dnsServer: state.settings.dnsServer
+    dnsServer: state.settings.dnsServer,
+    routingEngine: state.settings.routingEngine || 'singbox'
   })
 
   const save = async () => {
     await api.updateSettings(form)
+    refresh()
+  }
+
+  const setEngine = async (routingEngine) => {
+    setForm((f) => ({ ...f, routingEngine }))
+    await api.updateSettings({ routingEngine })
     refresh()
   }
 
@@ -156,6 +163,37 @@ function SettingsPage({ state, refresh }) {
           <div className="subtitle">Binary paths and DNS used for domain rule resolution.</div>
         </div>
       </div>
+
+      {isMac && (
+        <div className="card">
+          <div className="field">
+            <label>Routing engine</label>
+            <div className="flex" style={{ gap: 8 }}>
+              <button
+                className={`btn btn-sm ${form.routingEngine === 'singbox' ? 'btn-primary' : ''}`}
+                onClick={() => setEngine('singbox')}
+              >
+                sing-box (fake-IP)
+              </button>
+              <button
+                className={`btn btn-sm ${form.routingEngine === 'builtin' ? 'btn-primary' : ''}`}
+                onClick={() => setEngine('builtin')}
+              >
+                Built-in (route table)
+              </button>
+              <span className="muted" style={{ fontSize: 12, alignSelf: 'center' }}>
+                {state.singbox && state.singbox.running ? 'engine running' : 'engine idle'}
+              </span>
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+              <b>sing-box</b> routes by domain even when sites share the same CDN IPs (e.g. several
+              <code> *.example.com</code> hosts on Cloudflare going to different VPNs) — the only way to split shared
+              IPs. <b>Built-in</b> uses the local DNS + OS route table (can't split shared CDN IPs). Switching
+              reconnects routing; re-test after changing.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="field">

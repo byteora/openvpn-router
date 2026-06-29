@@ -58,11 +58,12 @@ managed routes are removed.
 ## Requirements
 
 - **Windows 10/11** or **macOS**
-- **OpenVPN** installed (the `openvpn` binary), and set its path in *Settings* if not
-  auto-detected:
-  - Windows: typically `C:\Program Files\OpenVPN\bin\openvpn.exe`
-  - macOS: `brew install openvpn` → `/opt/homebrew/sbin/openvpn` (Apple Silicon) or
-    `/usr/local/sbin/openvpn` (Intel)
+- **OpenVPN** (the `openvpn` binary):
+  - **macOS packaged app** — bundled inside the app, nothing to install.
+  - **macOS dev / building the DMG** — `brew install openvpn`; `npm run dist:mac`
+    copies that binary (and its dylibs) into the app at package time.
+  - **Windows** — install OpenVPN and set its path in *Settings* if not
+    auto-detected (typically `C:\Program Files\OpenVPN\bin\openvpn.exe`).
 - **Elevated privileges** — editing the routing table and system DNS requires them:
   - Windows: run as **Administrator** (packaged build prompts via UAC)
   - macOS: run with **root** (`sudo` in dev; packaged `.app` prompts for an admin password)
@@ -81,7 +82,29 @@ sudo npm run dev
 npm run build    # produce out/ bundles
 npm run preview  # run the built app
 npm run dist     # package an installer (NSIS on Windows, DMG on macOS)
+npm run dist:mac # macOS: bundle the openvpn binary into the app, then build the DMG
 ```
+
+> The macOS DMG ships a self-contained `openvpn` (binary + its dylibs) **and**
+> `sing-box`, both under `Contents/Resources/bin/darwin`, so end users don't need
+> anything installed. Build it with `npm run dist:mac`; this requires `openvpn`
+> and `dylibbundler` (`brew install openvpn dylibbundler`) on the build machine
+> (sing-box is downloaded automatically). It bundles the build machine's
+> architecture — build on Apple Silicon for arm64, Intel for x86_64.
+
+### Routing engines
+
+Two engines are selectable in *Settings* (macOS):
+
+- **sing-box (fake-IP)** — *default*. A bundled [sing-box](https://sing-box.sagernet.org)
+  process owns DNS + routing: each domain gets a unique synthetic IP, and traffic
+  is dialed out the chosen VPN's tunnel interface (`bind_interface`). This is the
+  **only** way to route domains that share the same CDN IPs (e.g. several
+  `*.example.com` hosts on Cloudflare) to *different* VPNs. App still manages the
+  OpenVPN tunnels; sing-box decides the exit per domain/IP.
+- **Built-in (route table)** — the legacy local-DNS + OS-route-table engine
+  described above. Simpler, but cannot split traffic when multiple domains resolve
+  to the same shared CDN IPs (the host route can only point at one tunnel).
 
 ## Notes & limitations
 

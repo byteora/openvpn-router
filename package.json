@@ -9,12 +9,18 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "electron-vite build && electron-builder"
+    "bundle:openvpn:mac": "bash scripts/bundle-openvpn-macos.sh",
+    "bundle:singbox:mac": "bash scripts/bundle-singbox-macos.sh",
+    "bundle:mac": "npm run bundle:openvpn:mac && npm run bundle:singbox:mac",
+    "dist": "electron-vite build && electron-builder",
+    "dist:mac": "npm run bundle:mac && electron-vite build && electron-builder --mac"
   },
   "build": {
     "appId": "com.openvpnrouter.app",
     "productName": "OpenVPN Router",
-    "files": ["out/**/*"],
+    "files": [
+      "out/**/*"
+    ],
     "win": {
       "target": "nsis",
       "requestedExecutionLevel": "requireAdministrator"
@@ -24,12 +30,19 @@
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "extraResources": [
+        {
+          "from": "resources/bin/darwin",
+          "to": "bin/darwin"
+        }
+      ]
     }
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^31.7.7",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

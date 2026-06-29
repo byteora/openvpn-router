@@ -119,13 +119,59 @@ export class VpnManager extends EventEmitter {
     this.connections.set(vpn.id, conn)
     this.emit('status', vpn.id, { ...conn.status })
 
-    logger.info('vpn', `${vpn.name}: launching ${settings.openvpnPath} (mgmt :${port})`)
+    // A packaged build launched via the GUI / `launchctl asuser` runs with a
+    // minimal PATH (no Homebrew), so a bare "openvpn" can't be found and spawn
+    // fails with ENOENT. Resolve it to a concrete path up front (locateOpenvpn
+    // scans known install dirs via fs, independent of PATH).
+    let bin = settings.openvpnPath
+    if (!bin || !bin.includes('/') || !fs.existsSync(bin)) {
+      const found = await platform.locateOpenvpn()
+      if (found) bin = found
+    }
+    if (!bin || (bin.includes('/') && !fs.existsSync(bin))) {
+      const msg = `openvpn binary not found (configured: "${settings.openvpnPath}") — set its full path in Settings`
+      this._update(vpn.id, { state: 'error', message: msg })
+      logger.error('vpn', `${vpn.name}: ${msg}`)
+      this._cleanup(vpn.id)
+      return
+    }
 
-    const proc = spawn(settings.openvpnPath, args, { cwd, windowsHide: true })
+    logger.info('vpn', `${vpn.name}: launching ${bin} (mgmt :${port})`)
+
+    // Augment PATH so any child lookups still work even in a stripped GUI env.
+    const env = {
+      ...process.env,
+      PATH: `${process.env.PATH || ''}:/opt/homebrew/sbin:/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin`
+    }
+    const proc = spawn(bin, args, { cwd, windowsHide: true, env })
     conn.proc = proc
 
-    proc.stdout.on('data', (d) => logger.info('openvpn', `${vpn.name}: ${d.toString().trim()}`))
-    proc.stderr.on('data', (d) => logger.warn('openvpn', `${vpn.name}: ${d.toString().trim()}`))
+    // Authoritatively map THIS process to the tun interface it opens, by parsing
+    // its own log. Reverse-resolving by tunnel IP is ambiguous when two VPNs
+    // share OpenVPN's default 10.8.0.0/24 (same local IP/gateway) — the lookup
+    // would bind the second VPN to the first VPN's utun, sending its traffic out
+    // the wrong exit. The binary prints e.g. "Opened utun device utun6".
+    const onOpenvpnLine = (line) => {
+      if (conn.ifAuthoritative) return
+      const m =
+        line.match(/Opened utun device\s+(\S+)/i) ||
+        line.match(/device\s+\[(\S+)\]\s+opened/i) ||
+        line.match(/TUN\/TAP device\s+(\S+)\s+opened/i)
+      if (m && m[1]) {
+        conn.ifAuthoritative = true
+        if (conn.status.ifIndex !== m[1]) {
+          logger.info('vpn', `${vpn.name}: tunnel interface ${m[1]}`)
+          this._update(vpn.id, { ifIndex: m[1] })
+        }
+      }
+    }
+    const onOutput = (text, level) => {
+      const t = text.toString()
+      logger[level]('openvpn', `${vpn.name}: ${t.trim()}`)
+      for (const line of t.split(/\r?\n/)) onOpenvpnLine(line)
+    }
+    proc.stdout.on('data', (d) => onOutput(d, 'info'))
+    proc.stderr.on('data', (d) => onOutput(d, 'warn'))
 
     proc.on('error', (err) => {
       this._update(vpn.id, { state: 'error', message: `spawn failed: ${err.message}` })
@@ -190,7 +236,9 @@ export class VpnManager extends EventEmitter {
 
   async _resolveInterface(vpnId) {
     const conn = this.connections.get(vpnId)
-    if (!conn || conn.status.ifIndex) return
+    // The interface parsed from the process log is authoritative; don't clobber
+    // it with the ambiguous tunnel-IP reverse lookup (see onOpenvpnLine).
+    if (!conn || conn.ifAuthoritative || conn.status.ifIndex) return
     if (!conn.status.localIp) return
     const idx = await routeManager.interfaceIndexForIp(conn.status.localIp)
     if (idx) this._update(vpnId, { ifIndex: idx })

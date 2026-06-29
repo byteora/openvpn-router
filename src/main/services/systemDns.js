@@ -18,6 +18,7 @@ const LOCAL_RESOLVER = '127.0.0.1'
 class SystemDns {
   constructor() {
     this.state = null // opaque platform state for restore()
+    this.appliedResolver = null // which resolver address we currently point at
   }
 
   _markerFile() {
@@ -49,16 +50,23 @@ class SystemDns {
     }
   }
 
-  async apply() {
-    if (this.state) return
-    const res = await platform.setDns([LOCAL_RESOLVER])
+  /**
+   * Point the system DNS at `resolver` (the builtin engine uses the loopback
+   * resolver; the sing-box engine uses its tun address). Re-applies cleanly if
+   * the desired resolver changed (e.g. switching engines).
+   */
+  async apply(resolver = LOCAL_RESOLVER) {
+    if (this.state && this.appliedResolver === resolver) return
+    if (this.state) await this.restore() // switching target: restore first
+    const res = await platform.setDns([resolver])
     if (!res.ok) {
       logger.error('sysdns', `failed to set system DNS: ${res.detail || ''}`)
       return
     }
     this.state = res.state
+    this.appliedResolver = resolver
     this._writeMarker(res.state)
-    logger.info('sysdns', `system DNS -> ${LOCAL_RESOLVER} ${res.detail || ''}`)
+    logger.info('sysdns', `system DNS -> ${resolver} ${res.detail || ''}`)
   }
 
   async restore() {
@@ -67,6 +75,7 @@ class SystemDns {
     this._clearMarker()
     logger.info('sysdns', 'system DNS restored')
     this.state = null
+    this.appliedResolver = null
   }
 
   /** Synchronous restore for crash/signal cleanup. Safe to call repeatedly. */

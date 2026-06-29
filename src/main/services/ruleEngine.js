@@ -87,6 +87,10 @@ export async function computeDesiredRoutes(state, statuses, physical) {
     const s = statuses[id]
     return { gateway: s.gateway || '0.0.0.0', ifIndex: s.ifIndex || null }
   }
+  const vpnName = (id) => {
+    const v = vpns.find((x) => x.id === id)
+    return v ? v.name : id
+  }
 
   const desired = []
   const exitMap = await buildExitMap({ vpns, globalRules }, isConnected)
@@ -108,25 +112,26 @@ export async function computeDesiredRoutes(state, statuses, physical) {
       for (const id of Object.keys(statuses)) {
         const s = statuses[id]
         if (s.state === 'connected' && s.serverIp) {
-          desired.push({ dest: s.serverIp, prefixLen: 32, gateway: physical.gateway, ifIndex: physical.ifIndex, metric: 1 })
+          desired.push({ dest: s.serverIp, prefixLen: 32, gateway: physical.gateway, ifIndex: physical.ifIndex, metric: 1, note: `pin ${vpnName(id)} server (DIRECT)` })
         }
       }
       // split default through the chosen VPN (overrides 0.0.0.0/0 without removing it)
       const gw = vpnGw(settings.defaultProxyVpnId)
-      desired.push({ dest: '0.0.0.0', prefixLen: 1, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 5 })
-      desired.push({ dest: '128.0.0.0', prefixLen: 1, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 5 })
+      const allNote = `proxy-all via VPN ${vpnName(settings.defaultProxyVpnId)}`
+      desired.push({ dest: '0.0.0.0', prefixLen: 1, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 5, note: allNote })
+      desired.push({ dest: '128.0.0.0', prefixLen: 1, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 5, note: allNote })
     }
   }
 
   for (const { dest, prefixLen, exit } of exitMap.values()) {
     if (exit === 'direct') {
       if (defaultProxy && physical && physical.gateway) {
-        desired.push({ dest, prefixLen, gateway: physical.gateway, ifIndex: physical.ifIndex, metric: 3 })
+        desired.push({ dest, prefixLen, gateway: physical.gateway, ifIndex: physical.ifIndex, metric: 3, note: 'DIRECT' })
       }
     } else {
       if (defaultProxy && exit === settings.defaultProxyVpnId) continue
       const gw = vpnGw(exit)
-      desired.push({ dest, prefixLen, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 3 })
+      desired.push({ dest, prefixLen, gateway: gw.gateway, ifIndex: gw.ifIndex, metric: 3, note: `VPN ${vpnName(exit)}` })
     }
   }
 

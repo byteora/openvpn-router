@@ -34,7 +34,10 @@ const DEFAULTS = {
     openvpnPath: 'openvpn',
     dnsServer: '1.1.1.1',
     defaultPolicy: 'direct',
-    defaultProxyVpnId: null
+    defaultProxyVpnId: null,
+    // 'singbox' = fake-IP engine (routes domains sharing CDN IPs to different
+    // VPNs correctly); 'builtin' = the legacy local-DNS + route-table engine.
+    routingEngine: 'singbox'
   },
   vpns: [],
   globalRules: []
@@ -61,6 +64,7 @@ class Store {
   _migrate(raw) {
     const data = structuredClone(DEFAULTS)
     Object.assign(data.settings, raw.settings || {})
+    data.settings.routingEngine = data.settings.routingEngine === 'builtin' ? 'builtin' : 'singbox'
     data.globalRules = Array.isArray(raw.globalRules) ? raw.globalRules : []
     data.vpns = Array.isArray(raw.vpns)
       ? raw.vpns.map((v) => ({

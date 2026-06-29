@@ -5,6 +5,7 @@ import { registerIpc } from './ipc.js'
 import { orchestrator } from './services/router.js'
 import { vpnManager } from './services/vpnManager.js'
 import { systemDns } from './services/systemDns.js'
+import { singboxManager } from './services/singboxManager.js'
 import { getStore } from './services/store.js'
 import { logger } from './services/logger.js'
 import { platform, isSupportedPlatform } from './platform/index.js'
@@ -85,6 +86,8 @@ app.on('second-instance', () => {
 
 app.whenReady().then(async () => {
   if (!gotLock) return
+  logger.clear()
+
   if (!(await ensureElevated())) return
 
   // Self-heal: if a previous run crashed while DNS was hijacked, restore it now
@@ -135,6 +138,11 @@ let emergencyDone = false
 function emergencyCleanupSync() {
   if (emergencyDone) return
   emergencyDone = true
+  try {
+    singboxManager.stopSync()
+  } catch {
+    /* ignore */
+  }
   try {
     systemDns.restoreSync()
   } catch {

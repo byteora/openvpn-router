@@ -38,6 +38,10 @@ class Logger extends EventEmitter {
   history() {
     return this.lines.slice()
   }
+
+  clear() {
+    this.lines = []
+  }
 }
 
 export const logger = new Logger()

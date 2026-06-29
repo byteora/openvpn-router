@@ -53,9 +53,10 @@ export class RouteManager {
     if (!res.ok) {
       logger.warn('route', `add ${route.dest}/${route.prefixLen} via ${route.gateway} failed: ${res.detail || ''}`)
     } else if (!quiet) {
+      const target = route.ifIndex ? `if ${route.ifIndex}` : `via ${route.gateway}`
       logger.info(
         'route',
-        `+ ${route.dest}/${route.prefixLen} via ${route.gateway}${route.ifIndex ? ` if ${route.ifIndex}` : ''}`
+        `+ ${route.dest}/${route.prefixLen} -> ${route.note || target} (${target})`
       )
     }
     return res.ok

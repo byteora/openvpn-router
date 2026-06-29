@@ -1,4 +1,5 @@
 import fs from 'fs'
+import path from 'path'
 import { app } from 'electron'
 import { run, runSync } from './common.js'
 
@@ -68,7 +69,15 @@ export const darwinPlatform = {
     // Relaunch the packaged .app as root via a GUI auth prompt.
     if (!app.isPackaged) return false
     const exe = process.execPath.replace(/"/g, '\\"')
-    const script = `do shell script "\\"${exe}\\" > /dev/null 2>&1 &" with administrator privileges`
+    // Capture the logged-in user's uid *before* we elevate (we are still that
+    // user here). `osascript ... with administrator privileges` spawns root in a
+    // privileged launchd context detached from the user's Aqua/GUI session, so
+    // session-scoped services like the pasteboard are unreachable (paste/Cmd+V
+    // silently fail). `launchctl asuser <uid>` re-parents the process back into
+    // that GUI session; it does not drop privileges, so we stay root.
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null
+    const launch = uid != null ? `launchctl asuser ${uid} \\"${exe}\\"` : `\\"${exe}\\"`
+    const script = `do shell script "${launch} > /dev/null 2>&1 &" with administrator privileges`
     try {
       run('/usr/bin/osascript', ['-e', script])
       return true
@@ -88,13 +97,56 @@ export const darwinPlatform = {
     return !!(await which(openvpnPath))
   },
 
+  /**
+   * Path to the openvpn binary we ship inside the app (see
+   * scripts/bundle-openvpn-macos.sh + the `extraResources` mapping). Packaged it
+   * lives under Contents/Resources/bin/darwin; in dev it's the repo's resources/.
+   * @returns {string|null}
+   */
+  bundledOpenvpn() {
+    const rel = path.join('bin', 'darwin', 'openvpn')
+    const candidate = app.isPackaged
+      ? path.join(process.resourcesPath, rel)
+      : path.join(process.cwd(), 'resources', rel)
+    return fs.existsSync(candidate) ? candidate : null
+  },
+
   async locateOpenvpn() {
+    // Prefer the binary we ship so the app works with no OpenVPN installed.
+    const bundled = this.bundledOpenvpn()
+    if (bundled) return bundled
     const onPath = await which('openvpn')
     if (onPath && fs.existsSync(onPath)) return onPath
     for (const p of OPENVPN_PATHS) {
       if (fs.existsSync(p)) return p
     }
     return null
+  },
+
+  /** Path to the bundled sing-box binary (packaged or dev), or null. */
+  bundledSingbox() {
+    const rel = path.join('bin', 'darwin', 'sing-box')
+    const candidate = app.isPackaged
+      ? path.join(process.resourcesPath, rel)
+      : path.join(process.cwd(), 'resources', rel)
+    return fs.existsSync(candidate) ? candidate : null
+  },
+
+  async locateSingbox() {
+    const bundled = this.bundledSingbox()
+    if (bundled) return bundled
+    const onPath = await which('sing-box')
+    if (onPath && fs.existsSync(onPath)) return onPath
+    for (const p of ['/opt/homebrew/bin/sing-box', '/usr/local/bin/sing-box']) {
+      if (fs.existsSync(p)) return p
+    }
+    return null
+  },
+
+  /** Physical default-route interface name (e.g. "en0"), or null. */
+  async physicalInterface() {
+    const def = await this.getDefaultRoute()
+    return def && def.ifIndex ? def.ifIndex : null
   },
 
   openvpnExtraArgs() {
@@ -128,9 +180,17 @@ export const darwinPlatform = {
     return null
   },
 
-  async routeAdd({ dest, prefixLen, gateway, metric }) {
-    const target = prefixLen >= 32 ? dest : `${dest}/${prefixLen}`
-    const args = prefixLen >= 32 ? ['-n', 'add', '-host', dest, gateway] : ['-n', 'add', '-net', target, gateway]
+  async routeAdd({ dest, prefixLen, gateway, ifIndex, metric }) {
+    const isHost = prefixLen >= 32
+    const target = isHost ? dest : `${dest}/${prefixLen}`
+    // Point-to-point tunnel interfaces (utun/tun/ppp/...) must be addressed by
+    // interface, not by gateway IP: OpenVPN defaults every tunnel's gateway to
+    // 10.8.0.1, so multiple VPNs collide — `route add -host x 10.8.0.1` resolves
+    // 10.8.0.1 to whichever single utun owns it, dumping every such route onto
+    // one VPN. Binding to the interface routes each VPN's traffic correctly.
+    const useIface = !!ifIndex && /^(utun|tun|ppp|ipsec|gif|gpd)\d*$/i.test(ifIndex)
+    const via = useIface ? ['-interface', ifIndex] : [gateway]
+    const args = isHost ? ['-n', 'add', '-host', dest, ...via] : ['-n', 'add', '-net', target, ...via]
     let res = await run('/sbin/route', args)
     if (!res.ok && /File exists/i.test(res.stderr + res.stdout)) {
       await this.routeDelete({ dest, prefixLen })
@@ -143,6 +203,28 @@ export const darwinPlatform = {
   async routeDelete({ dest, prefixLen }) {
     const args = prefixLen >= 32 ? ['-n', 'delete', '-host', dest] : ['-n', 'delete', '-net', `${dest}/${prefixLen}`]
     const res = await run('/sbin/route', args)
+    return res.ok
+  },
+
+  // Interface-scoped default route. macOS source-based routing (scopedroute)
+  // only applies this to sockets that bound to `ifName` via IP_BOUND_IF. That
+  // is exactly what sing-box's `bind_interface` does, so each VPN tunnel can own
+  // its own default without fighting the global one — and a route-nopull tunnel
+  // (which carries only its /24) can then reach arbitrary public IPs.
+  async addScopedDefault(ifName) {
+    if (!ifName) return { ok: false, detail: 'no interface' }
+    const args = ['-n', 'add', '-ifscope', ifName, '-inet', 'default', '-interface', ifName]
+    let res = await run('/sbin/route', args)
+    if (!res.ok && /File exists/i.test(res.stderr + res.stdout)) {
+      await this.removeScopedDefault(ifName)
+      res = await run('/sbin/route', args)
+    }
+    return { ok: res.ok, detail: (res.stderr || res.stdout).trim() }
+  },
+
+  async removeScopedDefault(ifName) {
+    if (!ifName) return false
+    const res = await run('/sbin/route', ['-n', 'delete', '-ifscope', ifName, '-inet', 'default'])
     return res.ok
   },
 
