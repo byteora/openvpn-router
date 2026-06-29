@@ -228,6 +228,27 @@ export const darwinPlatform = {
     return res.ok
   },
 
+  // Remove any IPv6 default route bound to a tunnel interface. When an OpenVPN
+  // tunnel goes down its utun can briefly linger with only a link-local address
+  // while a `default via fe80::%utunX` route still points at it — a black hole
+  // that makes IPv6-preferring apps stall (Happy Eyeballs) until they fall back
+  // to IPv4. Best-effort: try both the interface-scoped and the link-local
+  // gateway forms; ignore failures (the route may simply not exist).
+  async removeInterfaceV6Default(ifName) {
+    if (!ifName) return false
+    let any = false
+    const attempts = [
+      ['-n', 'delete', '-inet6', 'default', '-ifscope', ifName],
+      ['-n', 'delete', '-inet6', 'default', '-interface', ifName],
+      ['-n', 'delete', '-inet6', 'default', `fe80::%${ifName}`]
+    ]
+    for (const args of attempts) {
+      const res = await run('/sbin/route', args)
+      if (res.ok) any = true
+    }
+    return any
+  },
+
   // ---- system DNS -----------------------------------------------------------
   async _primaryService() {
     const def = await this.getDefaultRoute()

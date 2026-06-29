@@ -271,6 +271,16 @@ export class VpnManager extends EventEmitter {
         /* ignore */
       }
     }
+    // The process is gone, so its tunnel is down: scrub any IPv6 default route
+    // left bound to this utun so it can't become a black hole for v6 traffic.
+    const ifName = conn.status && conn.status.ifIndex
+    if (ifName && typeof platform.removeInterfaceV6Default === 'function') {
+      Promise.resolve(platform.removeInterfaceV6Default(ifName))
+        .then((removed) => {
+          if (removed) logger.info('vpn', `cleared stale IPv6 default route on ${ifName}`)
+        })
+        .catch(() => {})
+    }
     this.connections.delete(vpnId)
     if (conn.resolveClose) conn.resolveClose()
   }
