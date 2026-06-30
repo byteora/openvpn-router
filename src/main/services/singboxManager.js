@@ -91,6 +91,10 @@ class SingboxManager {
       }
       proc.stdout.on('data', (d) => onLine(d, 'info'))
       proc.stderr.on('data', (d) => onLine(d, 'info')) // sing-box logs to stderr
+      // A stdio stream emitting 'error' with no listener (e.g. EPIPE if the pipe
+      // breaks) would throw and crash the whole app. Swallow it.
+      proc.stdout.on('error', () => {})
+      proc.stderr.on('error', () => {})
 
       proc.on('error', (err) => {
         logger.error('singbox', `spawn failed: ${err.message}`)

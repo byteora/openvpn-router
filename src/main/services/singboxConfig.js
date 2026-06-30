@@ -151,7 +151,10 @@ export function buildSingboxConfig(state, statuses, physical) {
   const upstreamDns = settings.dnsServer || '1.1.1.1'
 
   return {
-    log: { level: 'info', timestamp: true },
+    // `warn`, not `info`: at info sing-box logs ~4 lines per connection, which
+    // under normal browsing is a flood that hammers the in-app log + IPC and can
+    // eventually crash the renderer. Warnings/errors are still surfaced.
+    log: { level: 'warn', timestamp: true },
     dns: {
       servers: [
         // No `detour`: sing-box dials this itself and `auto_detect_interface`

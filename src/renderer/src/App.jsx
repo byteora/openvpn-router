@@ -264,12 +264,39 @@ function SettingsPage({ state, refresh }) {
   )
 }
 
+const MAX_LOG_LINES = 2000
+
 function LogsPage() {
   const [logs, setLogs] = useState([])
   useEffect(() => {
-    api.getLogs().then(setLogs)
-    const off = api.onLog((entry) => setLogs((prev) => [...prev.slice(-1999), entry]))
-    return off
+    let mounted = true
+    api.getLogs().then((l) => {
+      if (mounted) setLogs(l.slice(-MAX_LOG_LINES))
+    })
+    // Batch incoming log entries: under heavy traffic the engine can emit
+    // hundreds of lines/sec, and a setState per line re-renders the whole list
+    // each time, eventually crashing the renderer. Buffer and flush ~4x/sec.
+    let buffer = []
+    let timer = null
+    const flush = () => {
+      timer = null
+      if (!buffer.length) return
+      const batch = buffer
+      buffer = []
+      setLogs((prev) => {
+        const next = prev.concat(batch)
+        return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next
+      })
+    }
+    const off = api.onLog((entry) => {
+      buffer.push(entry)
+      if (timer == null) timer = setTimeout(flush, 250)
+    })
+    return () => {
+      mounted = false
+      if (timer) clearTimeout(timer)
+      if (off) off()
+    }
   }, [])
 
   return (

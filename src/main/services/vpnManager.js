@@ -172,6 +172,11 @@ export class VpnManager extends EventEmitter {
     }
     proc.stdout.on('data', (d) => onOutput(d, 'info'))
     proc.stderr.on('data', (d) => onOutput(d, 'warn'))
+    // A stdio stream emitting 'error' with no listener (e.g. EPIPE) would throw
+    // and crash the whole app — swallow it; 'exit'/'error' on proc handle the
+    // real lifecycle.
+    proc.stdout.on('error', () => {})
+    proc.stderr.on('error', () => {})
 
     proc.on('error', (err) => {
       this._update(vpn.id, { state: 'error', message: `spawn failed: ${err.message}` })
