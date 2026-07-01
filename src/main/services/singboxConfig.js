@@ -47,6 +47,18 @@ function vpnTag(id) {
   return `vpn-${id}`
 }
 
+/** Tunnel is usable for routing when its utun exists — including during a soft
+ *  reconnect (ping-restart / persist-tun) where state is `connecting` but the
+ *  interface is still up. Dropping it from config on that transient state
+ *  restarts sing-box and black-holes all traffic for seconds. */
+export function isTunnelUsable(status) {
+  return !!(
+    status &&
+    status.ifIndex &&
+    (status.state === 'connected' || status.state === 'connecting')
+  )
+}
+
 /** Turn one rule into a sing-box route-rule matcher fragment (no action yet). */
 function matcherFor(rule) {
   const v = (rule.value || '').trim()
@@ -77,7 +89,7 @@ function matcherFor(rule) {
  */
 export function buildSingboxConfig(state, statuses, physical) {
   const { settings, vpns, globalRules } = state
-  const isConnected = (id) => statuses[id] && statuses[id].state === 'connected' && statuses[id].ifIndex
+  const isConnected = (id) => isTunnelUsable(statuses[id])
   const physIf = physical && physical.ifIndex ? physical.ifIndex : null
 
   // ---- outbounds ------------------------------------------------------------

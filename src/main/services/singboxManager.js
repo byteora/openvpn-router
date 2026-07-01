@@ -3,7 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
 import { platform } from '../platform/index.js'
-import { buildSingboxConfig } from './singboxConfig.js'
+import { buildSingboxConfig, isTunnelUsable } from './singboxConfig.js'
 import { logger } from './logger.js'
 
 /**
@@ -43,7 +43,7 @@ class SingboxManager {
    * Otherwise (re)write the config and (re)start only when it actually changed.
    */
   async apply(state, statuses, physical) {
-    const anyConnected = Object.values(statuses).some((s) => s.state === 'connected' && s.ifIndex)
+    const anyConnected = Object.values(statuses).some((s) => isTunnelUsable(s))
     if (!anyConnected) {
       await this.stop()
       return { ok: true, running: false }

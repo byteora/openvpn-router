@@ -5,7 +5,7 @@ import { dnsResolver } from './dns.js'
 import { dnsRouter } from './dnsRouter.js'
 import { systemDns } from './systemDns.js'
 import { singboxManager } from './singboxManager.js'
-import { SINGBOX_DNS_ADDRESS } from './singboxConfig.js'
+import { SINGBOX_DNS_ADDRESS, isTunnelUsable } from './singboxConfig.js'
 import { computeDesiredRoutes } from './ruleEngine.js'
 import { platform } from '../platform/index.js'
 import { logger } from './logger.js'
@@ -59,7 +59,13 @@ class RoutingOrchestrator {
       .sort()
       .map((id) => {
         const s = statuses[id]
-        return `${id}:${s.state}:${s.gateway || ''}:${s.ifIndex || ''}:${s.serverIp || ''}`
+        // Ignore connected↔connecting flips during ping-restart soft reconnects:
+        // persist-tun keeps the same utun, so sing-box config doesn't need to
+        // change and restarting it would black-hole all traffic for seconds.
+        if (isTunnelUsable(s)) {
+          return `${id}:up:${s.ifIndex}:${s.gateway || ''}:${s.serverIp || ''}`
+        }
+        return `${id}:down:${s.state}`
       })
       .join('|')
   }
@@ -101,7 +107,7 @@ class RoutingOrchestrator {
 
       const statuses = vpnManager.getAllStatuses()
       const physical = await routeManager.refreshPhysicalGateway()
-      const anyConnected = Object.values(statuses).some((s) => s.state === 'connected')
+      const anyConnected = Object.values(statuses).some((s) => isTunnelUsable(s))
 
       if (state.settings.routingEngine === 'singbox') {
         await this._reconcileSingbox(state, statuses)
@@ -156,7 +162,7 @@ class RoutingOrchestrator {
     if (typeof platform.addScopedDefault !== 'function') return
     const want = new Set()
     for (const s of Object.values(statuses)) {
-      if (s.state === 'connected' && s.ifIndex && /^(utun|tun|ppp|ipsec)\d*$/i.test(s.ifIndex)) {
+      if (isTunnelUsable(s) && /^(utun|tun|ppp|ipsec)\d*$/i.test(s.ifIndex)) {
         want.add(s.ifIndex)
       }
     }
