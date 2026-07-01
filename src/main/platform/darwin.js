@@ -249,6 +249,23 @@ export const darwinPlatform = {
     return any
   },
 
+  /**
+   * Does traffic actually FORWARD through `ifName` to the internet? Tests a real
+   * TCP+TLS connect (via `curl --interface`) rather than ICMP — many VPN servers
+   * filter ICMP but forward TCP, so a ping probe would false-positive. Targets
+   * an IP literal (1.1.1.1:443) so no DNS is needed. Returns true on success.
+   */
+  async probeInterface(ifName, timeoutMs = 5000) {
+    if (!ifName) return false
+    const secs = Math.max(1, Math.ceil(timeoutMs / 1000))
+    const res = await run(
+      '/usr/bin/curl',
+      ['--interface', ifName, '-s', '-o', '/dev/null', '-m', String(secs), 'https://1.1.1.1'],
+      { timeout: timeoutMs + 2000 }
+    )
+    return res.ok
+  },
+
   // ---- system DNS -----------------------------------------------------------
   async _primaryService() {
     const def = await this.getDefaultRoute()

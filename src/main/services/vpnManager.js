@@ -93,6 +93,19 @@ export class VpnManager extends EventEmitter {
       '--auth-nocache',
       // we own the routing table, so don't let the server install routes
       '--route-nopull',
+      // Servers push their own `ping`/`ping-restart` which would override our
+      // command-line keepalive (one flaky server pushes ping-restart 120 — two
+      // whole minutes before a dead tunnel is noticed). Drop the pushed values
+      // so the short keepalive below actually takes effect.
+      '--pull-filter',
+      'ignore',
+      'ping',
+      // Detect a dead control channel fast: ping every 5s, reconnect if no reply
+      // for 11s (--ping-restart soft-restarts rather than exiting fatally).
+      '--ping',
+      '5',
+      '--ping-restart',
+      '11',
       ...platform.openvpnExtraArgs()
     ]
 
@@ -112,6 +125,12 @@ export class VpnManager extends EventEmitter {
       mgmt: null,
       authFile,
       parsed,
+      // kept so the health monitor can transparently reconnect a dead tunnel
+      vpn,
+      settings,
+      healthFails: 0,
+      healthCooldownUntil: 0,
+      reconnecting: false,
       closePromise,
       resolveClose,
       status: { ...this._emptyStatus(), state: 'connecting', message: 'starting openvpn' }
@@ -213,7 +232,13 @@ export class VpnManager extends EventEmitter {
           serverIp: st.remoteIp || conn.status.serverIp,
           since: conn.status.since || Date.now()
         })
+        // reset health tracking and give the fresh tunnel a grace period before
+        // the monitor starts probing it
+        conn.healthFails = 0
+        conn.reconnecting = false
+        conn.connectedAt = Date.now()
         await this._resolveInterface(vpn.id)
+        this._startHealthMonitor()
         this.emit('connected', vpn.id)
       } else if (st.name === 'EXITING') {
         this._update(vpn.id, { state: 'disconnected', message: '' })
@@ -288,6 +313,73 @@ export class VpnManager extends EventEmitter {
     }
     this.connections.delete(vpnId)
     if (conn.resolveClose) conn.resolveClose()
+    this._stopHealthMonitorIfIdle()
+  }
+
+  // ---- tunnel health monitor ------------------------------------------------
+  // A tunnel can go "silently dead": the utun stays up and OpenVPN's control
+  // channel may even keep answering, but no traffic forwards to the internet, so
+  // every rule pinned to it black-holes. Keepalive/ping-restart only catches a
+  // dead *control* channel; this actively probes real forwarding and reconnects.
+  _startHealthMonitor() {
+    if (this._healthTimer) return
+    if (typeof platform.probeInterface !== 'function') return
+    this._healthTimer = setInterval(() => {
+      this._healthTick().catch(() => {})
+    }, 20000)
+    if (this._healthTimer.unref) this._healthTimer.unref()
+  }
+
+  _stopHealthMonitorIfIdle() {
+    if (!this._healthTimer) return
+    const anyConnected = Array.from(this.connections.values()).some((c) => c.status.state === 'connected')
+    if (!anyConnected) {
+      clearInterval(this._healthTimer)
+      this._healthTimer = null
+    }
+  }
+
+  async _healthTick() {
+    const GRACE_MS = 30000 // don't probe a tunnel that just (re)connected
+    const FAIL_THRESHOLD = 3 // ~60s of confirmed no-forwarding before acting
+    const COOLDOWN_MS = 90000 // after a reconnect, leave it alone for a while
+    const now = Date.now()
+    for (const [id, conn] of this.connections) {
+      if (conn.status.state !== 'connected' || conn.reconnecting) continue
+      const ifName = conn.status.ifIndex
+      if (!ifName || !/^(utun|tun|ppp|ipsec)\d*$/i.test(ifName)) continue
+      if (conn.connectedAt && now - conn.connectedAt < GRACE_MS) continue
+      if (conn.healthCooldownUntil && now < conn.healthCooldownUntil) continue
+
+      const ok = await platform.probeInterface(ifName)
+      if (ok) {
+        conn.healthFails = 0
+        continue
+      }
+      conn.healthFails = (conn.healthFails || 0) + 1
+      logger.warn('vpn', `${conn.vpn.name}: tunnel probe failed via ${ifName} (${conn.healthFails}/${FAIL_THRESHOLD})`)
+      if (conn.healthFails >= FAIL_THRESHOLD) {
+        conn.healthCooldownUntil = now + COOLDOWN_MS
+        conn.healthFails = 0
+        this._reconnect(id).catch((e) => logger.error('vpn', `${conn.vpn.name}: reconnect failed: ${e.message}`))
+      }
+    }
+  }
+
+  async _reconnect(vpnId) {
+    const conn = this.connections.get(vpnId)
+    if (!conn || conn.reconnecting) return
+    conn.reconnecting = true
+    const { vpn, settings } = conn
+    logger.warn('vpn', `${vpn.name}: tunnel unresponsive — reconnecting`)
+    this.disconnect(vpnId)
+    // wait for the old process to fully exit (cleanup deletes it from the map)
+    await Promise.race([conn.closePromise, new Promise((r) => setTimeout(r, 6000))]).catch(() => {})
+    try {
+      await this.connect(vpn, settings)
+    } catch (e) {
+      logger.error('vpn', `${vpn.name}: reconnect error: ${e.message}`)
+    }
   }
 
   disconnectAll() {

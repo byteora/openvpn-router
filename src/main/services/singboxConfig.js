@@ -78,7 +78,7 @@ function matcherFor(rule) {
 export function buildSingboxConfig(state, statuses, physical) {
   const { settings, vpns, globalRules } = state
   const isConnected = (id) => statuses[id] && statuses[id].state === 'connected' && statuses[id].ifIndex
-  void physical
+  const physIf = physical && physical.ifIndex ? physical.ifIndex : null
 
   // ---- outbounds ------------------------------------------------------------
   // "direct" must NOT hard-bind to the physical interface: auto_route moves the
@@ -92,6 +92,16 @@ export function buildSingboxConfig(state, statuses, physical) {
     if (!isConnected(vpn.id)) continue
     outbounds.push({ type: 'direct', tag: vpnTag(vpn.id), bind_interface: statuses[vpn.id].ifIndex })
   }
+  // Dedicated outbound for sing-box's OWN upstream DNS, hard-bound to the
+  // physical NIC. Without this the upstream query relies on auto_detect_interface
+  // and can be re-captured by our own tun's port-53 `hijack-dns` rule, forming a
+  // resolution loop that intermittently times out ("lookup …: context deadline
+  // exceeded") and breaks all name resolution. IP_BOUND_IF to en0 forces the
+  // query straight out the real interface (en0 keeps the system default route),
+  // bypassing the tun entirely. (A direct outbound WITH bind_interface is not
+  // "empty", so a detour to it is valid.)
+  const DNS_OUT_TAG = 'dns-out'
+  if (physIf) outbounds.push({ type: 'direct', tag: DNS_OUT_TAG, bind_interface: physIf })
   const connectedTag = (id) => (isConnected(id) ? vpnTag(id) : null)
 
   // ---- route rules (first match wins): per-VPN rules, then global rules -----
@@ -157,18 +167,22 @@ export function buildSingboxConfig(state, statuses, physical) {
     log: { level: 'warn', timestamp: true },
     dns: {
       servers: [
-        // No `detour`: sing-box dials this itself and `auto_detect_interface`
-        // binds it to the real default interface (bypassing its own tun, so no
-        // loop). Pointing detour at the bare `direct` outbound is rejected
-        // ("detour to an empty direct outbound makes no sense").
-        { type: 'udp', tag: 'upstream', server: upstreamDns },
+        // Bind the upstream resolver to the physical NIC (see DNS_OUT_TAG above)
+        // so its queries never re-enter our tun and loop through hijack-dns.
+        // Falls back to auto_detect_interface when the physical NIC is unknown.
+        { type: 'udp', tag: 'upstream', server: upstreamDns, ...(physIf ? { detour: DNS_OUT_TAG } : {}) },
         { type: 'fakeip', tag: 'fakeip', inet4_range: FAKEIP_RANGE }
       ],
       rules: [
         // Drop HTTPS/SVCB (64/65): their ipv4hint/ipv6hint can carry real IPs
         // that let clients bypass fake-IP and skip policy routing.
         { query_type: [64, 65], action: 'predefined', rcode: 'NOERROR' },
-        { query_type: ['A', 'AAAA'], server: 'fakeip' }
+        // Answer AAAA with an immediate empty NOERROR: fake-IP only has a v4
+        // range, so sending AAAA to it makes IPv6-heavy sites (e.g. Apple) hang
+        // waiting on a v6 answer that never usefully comes. Empty-fast forces
+        // clients onto the A (fake-IP) path.
+        { query_type: 'AAAA', action: 'predefined', rcode: 'NOERROR' },
+        { query_type: 'A', server: 'fakeip' }
       ],
       // resolve real IPs (for fakeip reverse + outbound dialing) over physical
       strategy: 'ipv4_only',
